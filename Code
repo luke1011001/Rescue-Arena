@@ -1,0 +1,227 @@
+import threading
+import time
+import random
+import json
+import os
+import sys
+from collections import deque
+
+# CONFIG
+MAX_RESCUERS = 30
+MAX_FAILURES = 3
+TIME_LIMIT = 15
+CALL_INTERVAL = (3, 6)
+CITY_FILE = "city.json"
+TIPI_ZONE = [
+    "Residenziale",
+    "Commerciale",
+    "Industriale",
+    "Turistica",
+    "Sportiva"
+]
+
+LEVELS = {
+    "bianco": {"people": 1, "time": 3, "score": 10},
+    "verde":  {"people": 2, "time": 5, "score": 20},
+    "giallo": {"people": 4, "time": 8, "score": 40},
+    "rosso":  {"people": 6, "time": 12, "score": 70},
+    "nero":   {"people": 8, "time": 18, "score": 120}
+}
+
+# GLOBALI
+available_rescuers = MAX_RESCUERS
+score = 0
+failures = 0
+game_over = False
+
+lock = threading.Lock()
+call_queue = deque()
+active_calls = {}   # id -> call
+
+
+# CITTÀ 
+def create_city():
+    zones = [{"id": i, "name": f"Zona {i}", "tipo": random.choice(TIPI_ZONE), "active": False} for i in range(1, 26)]
+    with open(CITY_FILE, "w") as f:
+        json.dump({"zones": zones}, f, indent=4)
+
+
+def load_city():
+    if not os.path.exists(CITY_FILE):
+        create_city()
+    with open(CITY_FILE) as f:
+        return json.load(f)
+
+
+def save_city(city):
+    with open(CITY_FILE, "w") as f:
+        json.dump(city, f, indent=4)
+
+
+
+# THREAD INTERVENTO
+class Intervention(threading.Thread):
+    def __init__(self, call):
+        super().__init__()
+        self.call = call
+
+    def run(self):
+        global available_rescuers, score
+
+        time.sleep(self.call["duration"])
+
+        with lock:
+            available_rescuers += self.call["people"]
+            score += self.call["score"]
+            self.call["zone"]["active"] = False
+
+            print(f"\n✅ INTERVENTO {self.call['id']} COMPLETATO "
+                  f"| +{self.call['score']} punti")
+            print(f"👥 Soccorritori disponibili: {available_rescuers}\n")
+
+
+
+# TIMER CHIAMATA
+class CallTimer(threading.Thread):
+    def __init__(self, call_id):
+        super().__init__(daemon=True)
+        self.call_id = call_id
+
+    def run(self):
+        global failures, game_over
+
+        time.sleep(TIME_LIMIT)
+
+        with lock:
+            if self.call_id in active_calls:
+                call = active_calls.pop(self.call_id)
+                failures += 1
+                call["zone"]["active"] = False
+
+                print(f"\n⏰ CHIAMATA {self.call_id} SCADUTA!")
+                print(f"⚠️ Fallimenti: {failures}/{MAX_FAILURES}\n")
+
+                if failures >= MAX_FAILURES:
+                    game_over = True
+                    print("💀 GAME OVER 💀")
+                    print(f"PUNTEGGIO FINALE: {score}")
+                    sys.exit()
+
+
+
+# GENERATORE CHIAMATE
+def call_generator(city):
+    while not game_over:
+        time.sleep(random.randint(*CALL_INTERVAL))
+
+        free_zones = [z for z in city["zones"] if not z["active"]]
+        if not free_zones:
+            continue
+
+        zone = random.choice(free_zones)
+        zone["active"] = True
+        level = random.choice(list(LEVELS.keys()))
+        cid = random.randint(1000, 9999)
+
+        call = {
+            "id": cid,
+            "zone": zone,
+            "level": level,
+            "people": LEVELS[level]["people"],
+            "duration": LEVELS[level]["time"],
+            "score": LEVELS[level]["score"],
+            "arrival": time.time()
+        }
+
+        with lock:
+            call_queue.append(call)
+            active_calls[cid] = call
+
+        print(f"\n📞 Nuova chiamata ricevuta (ID {cid})")
+
+        CallTimer(cid).start()
+
+
+
+# GESTIONE UTENTE
+def handle_call(call):
+    global available_rescuers, failures, game_over
+
+    elapsed = int(time.time() - call["arrival"])
+    remaining = max(0, TIME_LIMIT - elapsed)
+
+    if remaining <= 0:
+        return
+
+    print("\n📞 CHIAMATA IN LINEA")
+    print(f"ID: {call['id']}")
+    print(f"Zona: {call['zone']['name']}")
+    print(f"Tipo: {call['zone']['tipo']}")
+    print(f"Livello: {call['level'].upper()}")
+    print(f"Soccorsi richiesti: {call['people']}")
+    print(f"⏱️ Tempo rimanente: {remaining} secondi")
+    print("Rispondere? (s / n)")
+
+    start = time.time()
+
+    while time.time() - start < remaining:
+        cmd = input("> ").lower()
+
+        with lock:
+            if call["id"] not in active_calls:
+                return  # già scaduta
+
+            if cmd == "n":
+                failures += 1
+                active_calls.pop(call["id"])
+                call["zone"]["active"] = False
+                print("❌ Chiamata ignorata")
+                break
+
+            if cmd == "s":
+                if available_rescuers < call["people"]:
+                    failures += 1
+                    active_calls.pop(call["id"])
+                    call["zone"]["active"] = False
+                    print("❌ Soccorritori insufficienti!")
+                    break
+
+                available_rescuers -= call["people"]
+                active_calls.pop(call["id"])
+                print(f"🚑 Inviati {call['people']} soccorritori")
+
+                Intervention(call).start()
+                return
+
+        print("❌ Risposta non valida")
+
+    if failures >= MAX_FAILURES:
+        game_over = True
+        print("\n💀 GAME OVER 💀")
+        print(f"PUNTEGGIO FINALE: {score}")
+        sys.exit()
+
+
+# MAIN
+def main():
+    city = load_city()
+
+    print("🎮 RESCUE ARENA – CENTRALE OPERATIVA")
+    print(f"👥 Soccorritori disponibili: {MAX_RESCUERS}")
+    print("⏱️ Tempo limite chiamate: 15 secondi")
+    print("⚠️ 3 fallimenti = GAME OVER\n")
+
+    threading.Thread(target=call_generator, args=(city,), daemon=True).start()
+
+    while not game_over:
+        if call_queue:
+            with lock:
+                call = call_queue.popleft()
+            handle_call(call)
+            save_city(city)
+        else:
+            time.sleep(1)
+
+
+if __name__ == "__main__":
+    main()
