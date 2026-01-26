@@ -101,7 +101,6 @@ class Intervention(threading.Thread):
             available_rescuers += self.call["people"]
             score += self.call["score"]
             self.call["zone"]["active"] = False
-            # NESSUNA STAMPA
 
 
 # TIMER CHIAMATA
